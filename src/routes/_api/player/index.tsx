@@ -35,6 +35,7 @@ import { Button, TextField } from "@mui/material";
 import JASSUB from "jassub";
 import workerUrl from "jassub/dist/jassub-worker.js?url";
 import wasmUrl from "jassub/dist/jassub-worker.wasm?url";
+import { parse } from 'ass-js';
 
 import PlayNextButton from "@/components/buttons/playNextButton";
 import PlayPreviousButton from "@/components/buttons/playPreviousButtom";
@@ -100,6 +101,8 @@ function VideoPlayer() {
 	]);
 
 	const [loading, setLoading] = useState(true);
+	const [subtitleKey, setSubtitleKey] = useState(0);
+	const [subtitleRenderer, setSubtitleRenderer] = useState(null);
 	const [settingsMenu, setSettingsMenu] = useState(null);
 	const settingsMenuOpen = Boolean(settingsMenu);
 	const [showVolumeControl, setShowVolumeControl] = useState(false);
@@ -292,32 +295,84 @@ function VideoPlayer() {
 		}
 		return [];
 	}, [mediaSource.subtitle.track, mediaSource.subtitle.enable]);
-	const handleSubtitleChange = (
-		e: ChangeEventHandler<HTMLInputElement | HTMLTextAreaElement>,
-	) => {
-		changeSubtitleTrack(e.target.value, mediaSource.subtitle.allTracks);
-	};
+	const handleSubtitleChange = useCallback((e) => {
+		const newTrack = Number(e.target.value);
+		const currentTime = player.current?.getCurrentTime() || 0;
+		changeSubtitleTrack(newTrack, mediaSource.subtitle.allTracks);
+		
+		if (subtitleRenderer) {
+		  subtitleRenderer.destroy();
+		  setSubtitleRenderer(null);
+		}
+		
+		setTimeout(() => {
+		  player.current?.seekTo(currentTime, "seconds");
+		}, 100);
+	}, [player, subtitleRenderer, mediaSource.subtitle.allTracks]);
+
+	const toggleSubtitles = useCallback(() => {
+		const currentTime = player.current?.getCurrentTime() || 0;
+		toggleSubtitleTrack();
+		
+		if (subtitleRenderer) {
+		  subtitleRenderer.destroy();
+		  setSubtitleRenderer(null);
+		}
+		
+		setTimeout(() => {
+		  player.current?.seekTo(currentTime, "seconds");
+		}, 100);
+	}, [player, subtitleRenderer]);
 
 	useEffect(() => {
 		if (player.current?.getInternalPlayer() && mediaSource.subtitle.enable) {
-			if (
-				mediaSource.subtitle.format === "ass" ||
-				mediaSource.subtitle.format === "ssa"
-			) {
-				const jassubRenderer = new JASSUB({
-					video: player.current?.getInternalPlayer(),
-					workerUrl,
-					wasmUrl,
-					subUrl: `${api.basePath}${mediaSource.subtitle.url}`,
-				});
-				return () => jassubRenderer.destroy(); // Remove JASSUB renderer when track changes to fix duplicate renders
+		  const fetchAndRenderSubtitles = async () => {
+			if (mediaSource.subtitle.format === "ass" || mediaSource.subtitle.format === "ssa") {
+			  const response = await fetch(`${api.basePath}${mediaSource.subtitle.url}`);
+			  const subtitleText = await response.text();
+	
+			  if (subtitleRenderer) {
+				subtitleRenderer.destroy();
+			  }
+	
+			  const jassubRenderer = new JASSUB({
+				video: player.current.getInternalPlayer(),
+				subContent: subtitleText,
+				workerUrl,
+				wasmUrl,
+				fonts: [{ name: 'default', data: subtitleFont }],
+				onInit: () => console.log('JASSUB initialized'),
+				onError: (err) => console.error('JASSUB error:', err),
+				renderMode: 'offscreen',
+				targetFps: 60,
+				prescaleFactor: 1,
+				dropAllAnimations: false,
+				libassMemoryLimit: 0,
+				libassGlyphLimit: 0,
+				asyncRenderMode: true
+			  });
+	
+			  setSubtitleRenderer(jassubRenderer);
+			} else if (mediaSource.subtitle.format === "vtt" || mediaSource.subtitle.format === "subrip") {
+			  const track = player.current.getInternalPlayer().textTracks[0];
+			  if (track) {
+				track.mode = 'showing';
+			  }
 			}
+		  };
+	
+		  fetchAndRenderSubtitles();
+		} else if (subtitleRenderer) {
+		  subtitleRenderer.destroy();
+		  setSubtitleRenderer(null);
 		}
-	}, [
-		mediaSource.subtitle.track,
-		mediaSource.subtitle.enable,
-		player.current?.getInternalPlayer(),
-	]);
+	
+		return () => {
+		  if (subtitleRenderer) {
+			subtitleRenderer.destroy();
+		  }
+		};
+	}, [mediaSource.subtitle, player.current]);
 
 	const showSkipIntroButton = useMemo(() => {
 		if (
@@ -618,28 +673,27 @@ function VideoPlayer() {
 										/>
 									</motion.div>
 									<IconButton
-										onClick={() => setMuted((state) => !state)}
-										onMouseMoveCapture={() => {
-											setShowVolumeControl(true);
-										}}
-									>
-										<span className="material-symbols-rounded">
-											{muted
-												? "volume_off"
-												: volume < 0.4
-													? "volume_down"
-													: "volume_up"}
+										disabled={mediaSource.subtitle.track === -2}
+										onClick={toggleSubtitles}
+										>
+										<span className={"material-symbols-rounded"}>
+											{mediaSource.subtitle.enable
+											? "closed_caption"
+											: "closed_caption_disabled"}
 										</span>
 									</IconButton>
 									<QueueButton />
 									<IconButton
 										disabled={mediaSource.subtitle.track === -2}
-										onClick={toggleSubtitleTrack}
-									>
+										onClick={() => {
+											toggleSubtitleTrack();
+											setSubtitleKey(prevKey => prevKey + 1);
+										}}
+										>
 										<span className={"material-symbols-rounded"}>
 											{mediaSource.subtitle.enable
-												? "closed_caption"
-												: "closed_caption_disabled"}
+											? "closed_caption"
+											: "closed_caption_disabled"}
 										</span>
 									</IconButton>
 									<IconButton
@@ -661,7 +715,7 @@ function VideoPlayer() {
 				)}
 			</motion.div>
 			<ReactPlayer
-				key={item?.Id}
+				key={`${item?.Id}`}
 				playing={playing}
 				url={playbackStream}
 				ref={player}
@@ -683,7 +737,14 @@ function VideoPlayer() {
 						attributes: {
 							crossOrigin: "true",
 						},
-						tracks: reactPlayerCaptions,
+						tracks: mediaSource.subtitle.enable && (mediaSource.subtitle.format === "vtt" || mediaSource.subtitle.format === "subrip")
+						? [{
+							kind: 'subtitles',
+							src: `${api.basePath}${mediaSource.subtitle.url}`,
+							srcLang: 'en',
+							default: true,
+						  }]
+						: [],
 					},
 				}}
 				volume={muted ? 0 : volume}

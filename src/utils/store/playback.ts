@@ -281,8 +281,16 @@ export const changeSubtitleTrack = (
 export const toggleSubtitleTrack = () => {
 	const prevState = usePlaybackStore.getState();
 	if (prevState.mediaSource.subtitle.track !== -1) {
-		prevState.mediaSource.subtitle.enable =
-			!prevState.mediaSource.subtitle.enable;
-		usePlaybackStore.setState(prevState);
+	  prevState.mediaSource.subtitle.enable = !prevState.mediaSource.subtitle.enable;
+	} else if (prevState.mediaSource.subtitle.allTracks?.length > 0) {
+	  const firstTrack = prevState.mediaSource.subtitle.allTracks[0];
+	  prevState.mediaSource.subtitle = {
+		...prevState.mediaSource.subtitle,
+		track: firstTrack.Index,
+		format: firstTrack.Codec,
+		url: firstTrack.DeliveryUrl,
+		enable: true
+	  };
 	}
+	usePlaybackStore.setState(prevState);
 };
